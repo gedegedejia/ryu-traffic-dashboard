@@ -32,6 +32,8 @@ interface PacketSummary {
 type TimeRange = "5m" | "15m" | "30m" | "1h";
 
 const pageSize = 10;
+const HISTORY_LIMIT = 120; // 最多保存120个点
+const LOCAL_HISTORY_KEY = 'traffic_history';
 
 export default function Statistics() {
   // 状态
@@ -47,28 +49,47 @@ export default function Statistics() {
   const pieChartRef = useRef<HTMLCanvasElement | null>(null);
   const lineChartInstance = useRef<Chart | null>(null);
   const pieChartInstance = useRef<Chart | null>(null);
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // fetchData 只请求全部数据
-  const fetchData = async () => {
-    setLoading(true);
-    setError("");
+  // 页面加载时，先从 localStorage 恢复历史
+  useEffect(() => {
     try {
-      // 获取协议统计和历史
+      const saved = localStorage.getItem(LOCAL_HISTORY_KEY);
+      if (saved) {
+        const parsed: HistoryRecord[] = JSON.parse(saved);
+        setLocalHistory(parsed);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, []);
+
+  // 定时采样协议统计数据
+  const fetchProtocolStats = async () => {
+    try {
       const res = await fetch("/api/stats/protocol");
       if (!res.ok) throw new Error("API error");
       const data = await res.json();
       setProtocolData(data.protocols);
-      const historyArr = data.history.protocols.map((p: any, i: number) => ({
-        timestamp: data.history.timestamps[i],
-        data: p,
-      }));
-      setLocalHistory(historyArr);
-
-      // 获取全部数据包摘要
-      const packetRes = await fetch("/api/stats/packet_summaries");
-      if (!packetRes.ok) throw new Error("Packet summaries API error");
-      const packetData = await packetRes.json();
-      setPacketSummaries(packetData.packet_summaries || []);
+      // 采样快照
+      setLocalHistory((prev) => {
+        const now = Math.floor(Date.now() / 1000);
+        const newHistory = [
+          ...prev,
+          { timestamp: now, data: { ...data.protocols } },
+        ];
+        // 只保留最近 HISTORY_LIMIT 个点
+        const trimmed = newHistory.length > HISTORY_LIMIT
+          ? newHistory.slice(newHistory.length - HISTORY_LIMIT)
+          : newHistory;
+        // 持久化到 localStorage
+        try {
+          localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(trimmed));
+        } catch (e) {
+          // ignore
+        }
+        return trimmed;
+      });
     } catch (e) {
       setError("数据获取失败");
     } finally {
@@ -77,7 +98,20 @@ export default function Statistics() {
   };
 
   useEffect(() => {
-    fetchData();
+    fetchProtocolStats();
+    // eslint-disable-next-line
+  }, []);
+
+  // 获取全部数据包摘要
+  const fetchPacketSummaries = async () => {
+    const packetRes = await fetch("/api/stats/packet_summaries");
+    if (!packetRes.ok) throw new Error("Packet summaries API error");
+    const packetData = await packetRes.json();
+    setPacketSummaries(packetData.packet_summaries || []);
+  };
+
+  useEffect(() => {
+    fetchPacketSummaries();
     // eslint-disable-next-line
   }, []);
 
@@ -208,7 +242,7 @@ export default function Statistics() {
     if (page < 1 || page > totalPages) return;
     setCurrentPage(page);
   };
-  const handleRefresh = () => fetchData();
+  const handleRefresh = () => fetchProtocolStats();
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
